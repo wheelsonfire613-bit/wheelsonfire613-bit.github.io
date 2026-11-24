@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Melt Machine VR Player</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#120d0b">
+<link rel="icon" href="icon-192.png">
+<style>
+  :root { --bg: #120d0b; --ink: #f1e6da; --dust: #b9a493; --ember: #e2763a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 18px/1.4 system-ui, sans-serif; }
+  main { width: min(760px, 94vw); margin: 0 auto; padding: 14px 0; display: grid; gap: 12px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .opts { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .small { font-size: 15px; }
+  h1 { margin: 0; font-size: 26px; letter-spacing: .02em; }
+  p { margin: 0; color: var(--dust); }
+  button, label.btn { font: inherit; font-size: 24px; padding: 18px 22px; border-radius: 12px; border: 0; background: var(--ember); color: #1a0f08; font-weight: 700; cursor: pointer; text-align: center; }
+  button:disabled { opacity: .35; cursor: default; }
+  select { font: inherit; font-size: 20px; padding: 12px; border-radius: 10px; background: #2a1f1a; color: var(--ink); border: 1px solid #4a372c; }
+  label.check { display: flex; gap: 12px; align-items: center; color: var(--dust); }
+  input[type=checkbox] { width: 28px; height: 28px; }
+  input[type=file] { display: none; }
+  #msg { min-height: 1.4em; color: var(--ink); }
+  #msg.bad { color: #ff8a70; }
+  video { display: none; }
+  .have { font-size: 1.05em; line-height: 1.6; white-space: pre-line; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Melt Machine VR Player</h1>
+  <div class="row">
+    <label class="btn" for="file">1. Choose video + sound file</label>
+    <button id="go" disabled>2. Enter VR</button>
+  </div>
+  <input type="file" id="file" multiple accept="video/*,audio/webm,.mp4,.webm">
+  <p id="name">No video picked yet. Plays 3D 360 and Lucid Engine 3D 180 videos straight from your headset; nothing is uploaded.</p>
+  <p class="small" id="soundLine">Lucid Engine 360 videos come with a look-around sound file (its name ends in “sound.webm”). Pick the video and that file together (tap one, then the other), or one after the other. Check both say ✓ below before you press Enter VR.</p>
+  <p id="have" class="have"></p>
+  <p id="msg"></p>
+  <div class="opts">
+    <select id="layout">
+      <option value="tb" selected>3D 360, top and bottom (Melt Machine)</option>
+      <option value="tb180">3D 180 front, top and bottom (Lucid Engine)</option>
+      <option value="vr180">3D VR180, side by side (YouTube style)</option>
+      <option value="sbs">3D 360, side by side</option>
+      <option value="mono">Plain 360 (no 3D)</option>
+    </select>
+    <label class="check"><input type="checkbox" id="swap"> Swap eyes</label>
+  </div>
+  <p class="small">Player v13.25 (installed app, 11-24). <span id="off"></span> The type is picked from the file name (Lucid Engine 180 files have "180" in the name; VR180 files have "VR180"). In VR: trigger = pause / play. Thumbstick right or left = skip 10 seconds. Meta button = leave.</p>
+</main>
+<video id="vid" playsinline preload="auto"></video>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const vid = $('vid'), msg = $('msg');
+  const say = (t, bad) => { msg.textContent = t; msg.className = bad ? 'bad' : ''; };
+  let fileURL = null, xrOK = false;
+
+  // Can this browser do VR at all?
+  const where = location.protocol === 'file:' ? 'a file on this device' : location.host;
+  if (!window.isSecureContext) say('VR check: ✗ this address is not https, so the browser turns VR mode off. (' + where + ')', true);
+  else if (!navigator.xr) say('VR check: ✗ this browser has no VR mode (WebXR). Open this page in the Meta Quest Browser.', true);
+  else navigator.xr.isSessionSupported('immersive-vr').then((ok) => {
+    xrOK = ok;
+    say(ok ? 'VR check: ✓ VR mode is allowed here. Pick your files.' : 'VR check: ✗ this browser says VR mode is not available here.', !ok);
+    refresh();
+  }).catch((e) => say('VR check: ✗ this web address blocks VR mode (' + (e && e.name ? e.name : 'error') + '). Use the other web address.', true));
+
+  function refresh() { $('go').disabled = !(fileURL && xrOK); }
+
+  $('file').addEventListener('change', async () => {
+    const fs = [...$('file').files]; if (!fs.length) return;
+    const isSound = async (x) => /LUCID-GAZE 1 /.test(await x.slice(0, 8192).text().catch(() => ''));
+    const kinds = await Promise.all(fs.map(isSound));
+    const f = fs.find((x, i) => !kinds[i]) || null, sf = fs.find((x, i) => kinds[i]) || null;
+    if (sf) await setSound(sf);
+    if (!f) { if (!sf) say('That wasn’t a video.', true); else if (G.on) say(fileURL ? 'Sound follows where you look.' : 'Got the sound file. Now pick its video too.'); have(); return; }
+    if (fileURL) URL.revokeObjectURL(fileURL);
+    fileURL = URL.createObjectURL(f);
+    vid.src = fileURL; vid.load();
+    $('name').textContent = f.name;
+    if (/_360_TB\./i.test(f.name)) $('layout').value = 'tb';
+    else if (/_180_FRONT\./i.test(f.name)) $('layout').value = 'tb180';
+    else if (/vr180|_180_LR\./i.test(f.name)) $('layout').value = 'vr180';
+    else if (/_lr|side.?by.?side|sbs/i.test(f.name)) $('layout').value = 'sbs';
+    else if (/180/.test(f.name)) $('layout').value = 'tb180';
+    else if (/360/.test(f.name)) $('layout').value = 'tb';
+    say('Loading the video...');
+    vid.onloadedmetadata = () => { say(`Ready: ${vid.videoWidth} x ${vid.videoHeight}, ${Math.round(vid.duration / 60)} min.`); have(); refresh(); };
+    vid.onerror = () => { const e = vid.error; say('The browser could not open that video' + (e ? ` (code ${e.code}${e.message ? ': ' + e.message : ''})` : '') + '. Try a smaller video, like Eye test A, to check.', true); };
+    have(); refresh();
+  });
+  function have() {
+    const vOK = !!fileURL, near = (a, b) => Math.abs(a - b) < 20;
+    let s = (vOK ? '✓ Video: ' + $('name').textContent : '✗ No video yet') + '\n' + (G.on ? '✓ Look-around sound: ' + G.name : '✗ No look-around sound file (the video’s own sound plays)');
+    if (vOK && G.on && vid.duration > 0 && !near(vid.duration, G.T)) s += '\n⚠ The sound file is ' + Math.round(G.T) + ' s long but the video is ' + Math.round(vid.duration) + ' s. Is it the sound for a different video?';
+    $('have').textContent = s;
+  }
+
+  // ---------- look-around sound ----------
+  const G = { name: '', on: false, url: null, T: 0, au: [], ac: null, g: [], pan: [], wired: false, lines: false, lg: null };
+  const D2R = Math.PI / 180, dir = (yaw, pit) => [Math.sin(yaw * D2R) * Math.cos(pit * D2R), Math.sin(pit * D2R), -Math.cos(yaw * D2R) * Math.cos(pit * D2R)];
+  let SCREENS = [dir(0, 0), dir(-100, 0), dir(100, 0), dir(0, 90)];
+  async function setSound(f) {
+    for (const a of G.au) { a.pause(); a.removeAttribute('src'); a.load(); }
+    if (G.url) URL.revokeObjectURL(G.url); G.on = false; G.url = null;
+    if (!f) { vid.muted = false; return; }
+    const head = await f.slice(0, 8192).text(), m = /LUCID-GAZE 1 T=(\d+)/.exec(head);
+    if (!m) { say('That sound file isn’t a Lucid Engine look-around sound.', true); vid.muted = false; return; }
+    { const sd = /SIDE=(\d+)/.exec(head), up = /UP=(\d+)/.exec(head), S = sd ? +sd[1] : 100, U = up ? +up[1] : 90; SCREENS = [dir(0, 0), dir(-S, 0), dir(S, 0), dir(0, U)]; }
+    G.T = Number(m[1]) / 48000; G.url = URL.createObjectURL(f); G.name = f.name; G.lines = /LINES=1/.test(head);
+    if (!G.au.length) for (let k = 0; k < 4; k++) { const a = document.createElement('audio'); a.preload = 'auto'; G.au.push(a); }
+    for (const a of G.au) { a.src = G.url; a.load(); }
+    G.on = true; vid.muted = true;
+  }
+  function wireSound() {
+    if (!G.on) return;
+    if (!G.ac) G.ac = new AudioContext();
+    if (!G.wired) {
+      const ac = G.ac, src = G.au.map(a => ac.createMediaElementSource(a));
+      src[0].connect(ac.destination);
+      for (const k of [1, 2]) { const sp = ac.createChannelSplitter(2); src[k].connect(sp);
+        for (const e of [0, 1]) { const g = ac.createGain(), p = ac.createStereoPanner(), mono = ac.createGain(); mono.channelCount = 1; mono.channelCountMode = 'explicit';
+          sp.connect(mono, e); mono.connect(g); g.connect(p); p.connect(ac.destination); G.g.push(g); G.pan.push(p); } }
+      G.lg = ac.createGain(); G.lg.gain.value = 0; src[3].connect(G.lg); G.lg.connect(ac.destination);
+      G.wired = true;
+    }
+    G.ac.resume();
+  }
+  function syncSound(force) {
+    if (!G.on) return;
+    for (let k = 0; k < (G.lines ? 4 : 3); k++) { const a = G.au[k], want = vid.currentTime + k * G.T;
+      if (vid.paused || vid.ended) { if (!a.paused) a.pause(); }
+      else { if (force || Math.abs(a.currentTime - want) > 0.06) a.currentTime = want; if (a.paused) a.play().catch(() => {}); }
+      if (vid.paused && force) a.currentTime = want; }
+  }
+  function aimSound(fwd, right) {
+    if (!G.on || !G.wired) return; const t = G.ac.currentTime;
+    const ease = (x, a, b) => { const u = Math.max(0, Math.min(1, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+    const gz = G.lines ? Math.max(ease(fwd[2], 0.5, 0.85), ease(-fwd[1], 0.6, 0.9)) : 0;
+    if (G.lg) G.lg.gain.setTargetAtTime(gz, t, 0.15);
+    SCREENS.forEach((d, k) => { const c = d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2], s = d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
+      const g = 0.08 + 0.92 * Math.pow((1 + c) / 2, 2);
+      G.g[k].gain.setTargetAtTime(g * (1 - gz), t, 0.15); G.pan[k].pan.setTargetAtTime(Math.max(-1, Math.min(1, 0.6 * s)), t, 0.06); });
+  }
+  for (const ev of ['play', 'pause', 'seeked', 'ended']) vid.addEventListener(ev, () => syncSound(true));
+  window.__mmp = { G, wireSound, syncSound, aimSound, vid };
+  have();
+  setInterval(() => syncSound(false), 250);
+
+  // ---------- VR ----------
+  const VS = `#version 300 es
+  in vec2 p; out vec2 ndc; void main(){ ndc = p; gl_Position = vec4(p, 0.0, 1.0); }`;
+  const FS = `#version 300 es
+  precision highp float;
+  in vec2 ndc; out vec4 o;
+  uniform mat4 uInvProj; uniform mat3 uRot; uniform sampler2D uTex; uniform vec4 uRect;
+  uniform vec2 uSpan;
+  void main(){
+    vec4 v = uInvProj * vec4(ndc, 1.0, 1.0);
+    vec3 d = normalize(uRot * (v.xyz / v.w));
+    float lon = atan(d.x, -d.z), lat = asin(clamp(d.y, -1.0, 1.0));
+    vec2 uv = vec2(0.5 + lon / (6.2831853 * uSpan.x), 0.5 + lat / (3.1415927 * uSpan.y));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }
+    o = vec4(texture(uTex, uRect.xy + clamp(uv, 0.001, 0.999) * uRect.zw).rgb, 1.0);
+  }`;
+
+  let session = null, gl = null, prog, tex, ref, U = {}, needFrame = true, lastSkip = 0;
+
+  function initGL() {
+    const c = document.createElement('canvas');
+    gl = c.getContext('webgl2', { xrCompatible: true, antialias: false, alpha: false });
+    if (!gl) throw new Error('No WebGL2');
+    const sh = (t, s) => { const x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(x)); return x; };
+    prog = gl.createProgram(); gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog);
+    for (const n of ['uInvProj', 'uRot', 'uTex', 'uRect', 'uSpan']) U[n] = gl.getUniformLocation(prog, n);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
+  function rectFor(eye) {
+    const L = $('layout').value; let left = eye !== 'right'; if ($('swap').checked) left = !left;
+    if (L === 'tb' || L === 'tb180') return left ? [0, 0.5, 1, 0.5] : [0, 0, 1, 0.5];
+    if (L === 'sbs' || L === 'vr180') return left ? [0, 0, 0.5, 1] : [0.5, 0, 0.5, 1];
+    return [0, 0, 1, 1];
+  }
+
+  function invert4(m) {
+    const a = m, r = new Float32Array(16);
+    const b00 = a[0]*a[5]-a[1]*a[4], b01 = a[0]*a[6]-a[2]*a[4], b02 = a[0]*a[7]-a[3]*a[4], b03 = a[1]*a[6]-a[2]*a[5],
+      b04 = a[1]*a[7]-a[3]*a[5], b05 = a[2]*a[7]-a[3]*a[6], b06 = a[8]*a[13]-a[9]*a[12], b07 = a[8]*a[14]-a[10]*a[12],
+      b08 = a[8]*a[15]-a[11]*a[12], b09 = a[9]*a[14]-a[10]*a[13], b10 = a[9]*a[15]-a[11]*a[13], b11 = a[10]*a[15]-a[11]*a[14];
+    const det = 1 / (b00*b11 - b01*b10 + b02*b09 + b03*b08 - b04*b07 + b05*b06);
+    r[0]=(a[5]*b11-a[6]*b10+a[7]*b09)*det; r[1]=(a[2]*b10-a[1]*b11-a[3]*b09)*det; r[2]=(a[13]*b05-a[14]*b04+a[15]*b03)*det; r[3]=(a[10]*b04-a[9]*b05-a[11]*b03)*det;
+    r[4]=(a[6]*b08-a[4]*b11-a[7]*b07)*det; r[5]=(a[0]*b11-a[2]*b08+a[3]*b07)*det; r[6]=(a[14]*b02-a[12]*b05-a[15]*b01)*det; r[7]=(a[8]*b05-a[10]*b02+a[11]*b01)*det;
+    r[8]=(a[4]*b10-a[5]*b08+a[7]*b06)*det; r[9]=(a[1]*b08-a[0]*b10-a[3]*b06)*det; r[10]=(a[12]*b04-a[13]*b02+a[15]*b00)*det; r[11]=(a[9]*b02-a[8]*b04-a[11]*b00)*det;
+    r[12]=(a[5]*b07-a[4]*b09-a[6]*b06)*det; r[13]=(a[0]*b09-a[1]*b07+a[2]*b06)*det; r[14]=(a[13]*b01-a[12]*b03-a[14]*b00)*det; r[15]=(a[8]*b03-a[9]*b01+a[10]*b00)*det;
+    return r;
+  }
+
+  function onFrame(t, frame) {
+    session.requestAnimationFrame(onFrame);
+    const pose = frame.getViewerPose(ref); if (!pose) return;
+    { const m = pose.transform.matrix; aimSound([-m[8], -m[9], -m[10]], [m[0], m[1], m[2]]); }
+    for (const src of session.inputSources) {
+      const ax = src.gamepad && src.gamepad.axes; if (!ax || ax.length < 3) continue;
+      const x = ax[2]; if (Math.abs(x) > 0.8 && t - lastSkip > 600) { lastSkip = t; vid.currentTime = Math.max(0, Math.min(vid.duration - 0.5, vid.currentTime + (x > 0 ? 10 : -10))); }
+    }
+    if (vid.readyState >= 2 && needFrame) {
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, vid);
+      if (vid.requestVideoFrameCallback) needFrame = false;
+    }
+    const layer = session.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+    gl.useProgram(prog); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(U.uTex, 0);
+    if ($('layout').value === 'tb180') gl.uniform2f(U.uSpan, 0.5, 0.5); else if ($('layout').value === 'vr180') gl.uniform2f(U.uSpan, 0.5, 1); else gl.uniform2f(U.uSpan, 1, 1);
+    for (const view of pose.views) {
+      const vp = layer.getViewport(view); gl.viewport(vp.x, vp.y, vp.width, vp.height);
+      const m = view.transform.matrix;
+      gl.uniformMatrix4fv(U.uInvProj, false, invert4(view.projectionMatrix));
+      gl.uniformMatrix3fv(U.uRot, false, new Float32Array([m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]));
+      gl.uniform4fv(U.uRect, rectFor(view.eye));
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+  }
+  function watchFrames() { if (!vid.requestVideoFrameCallback) return; vid.requestVideoFrameCallback(() => { needFrame = true; if (session) watchFrames(); }); }
+
+  $('go').addEventListener('click', async () => {
+    try {
+      if (!gl) initGL();
+      wireSound(); aimSound([0, 0, -1], [1, 0, 0]);
+      vid.play().catch(() => {});
+      try { session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local'] }); }
+      catch (e1) { session = await navigator.xr.requestSession('immersive-vr'); }
+      await gl.makeXRCompatible();
+      session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+      try { ref = await session.requestReferenceSpace('local'); } catch (e2) { ref = await session.requestReferenceSpace('viewer'); }
+      session.addEventListener('select', () => { if (vid.paused) vid.play(); else vid.pause(); });
+      session.addEventListener('end', () => { session = null; vid.pause(); say('Left VR. Press Enter VR to go back in.'); });
+      needFrame = true; watchFrames();
+      session.requestAnimationFrame(onFrame);
+      say('Playing in VR.');
+    } catch (e) { say('Could not start VR: ' + (e && e.message ? e.message : e), true); }
+  });
+})();
+</script>
+<script>
+// Offline: save this page so the installed app opens with no internet
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(() => {
+  document.getElementById('off').textContent = 'Saved for offline ✓';
+}).catch(e => { document.getElementById('off').textContent = 'Offline save failed: ' + e.message; });
+</script>
+</body>
+</html>
